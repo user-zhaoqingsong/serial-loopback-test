@@ -84,7 +84,7 @@ try {
     $deployedPath = $applicationPath
 }
 catch [System.IO.IOException] {
-    $fallbackFileName = (-join [char[]](0x4E32, 0x53E3, 0x73AF, 0x56DE, 0x6D4B, 0x8BD5)) + '_v1.3.0.exe'
+    $fallbackFileName = (-join [char[]](0x4E32, 0x53E3, 0x73AF, 0x56DE, 0x6D4B, 0x8BD5)) + '_v1.3.1.exe'
     $deployedPath = Join-Path $distDirectory $fallbackFileName
     Copy-Item -LiteralPath $candidatePath -Destination $deployedPath -Force
     Write-Warning 'The existing application is running. The new version was published with a versioned file name.'

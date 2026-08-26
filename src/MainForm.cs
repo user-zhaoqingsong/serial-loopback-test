@@ -77,8 +77,8 @@ namespace RsLoopTest
         {
             Text = "串口环回测试";
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(980, 780);
-            Size = new Size(1120, 860);
+            MinimumSize = new Size(980, 800);
+            Size = new Size(1120, 880);
             BackColor = Background;
             Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
             AutoScaleMode = AutoScaleMode.Dpi;
@@ -94,9 +94,9 @@ namespace RsLoopTest
             root.ColumnCount = 1;
             root.RowCount = 5;
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82F));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 202F));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 230F));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58F));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 240F));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 225F));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             Controls.Add(root);
 
@@ -311,28 +311,33 @@ namespace RsLoopTest
             customPatternInput = new TextBox();
             customPatternInput.Text = "55 AA 00 FF";
             customPatternInput.Font = new Font("Consolas", 9F);
-            customPatternInput.Location = new Point(18, 153);
+            customPatternInput.Location = new Point(18, 170);
             customPatternInput.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             customPatternInput.Width = Math.Max(120, group.Width - 286);
             customPatternInput.Enabled = false;
             group.Controls.Add(customPatternInput);
 
+            Label customPatternLabel = CreateFieldLabel("自定义 HEX（仅自定义模式）");
+            customPatternLabel.Location = new Point(18, 150);
+            group.Controls.Add(customPatternLabel);
+
             Label seedLabel = CreateFieldLabel("数据种子（十进制）");
-            seedLabel.Location = new Point(280, 135);
+            seedLabel.Location = new Point(280, 150);
             group.Controls.Add(seedLabel);
 
             dataSeedInput = new NumericUpDown();
             dataSeedInput.Minimum = 0;
             dataSeedInput.Maximum = uint.MaxValue;
             dataSeedInput.Value = 305419896; // 0x12345678
-            dataSeedInput.Location = new Point(280, 153);
+            dataSeedInput.Location = new Point(280, 170);
             dataSeedInput.Size = new Size(180, 28);
+            dataSeedInput.TextAlign = HorizontalAlignment.Left;
             group.Controls.Add(dataSeedInput);
             group.Resize += delegate
             {
                 int seedX = Math.Max(230, group.ClientSize.Width - 215);
-                seedLabel.Location = new Point(seedX, 135);
-                dataSeedInput.Location = new Point(seedX, 153);
+                seedLabel.Location = new Point(seedX, 150);
+                dataSeedInput.Location = new Point(seedX, 170);
                 dataSeedInput.Width = Math.Max(100, group.ClientSize.Width - seedX - 18);
                 customPatternInput.Width = Math.Max(120, seedX - 30);
             };
