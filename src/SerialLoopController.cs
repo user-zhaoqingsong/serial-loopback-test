@@ -1,23 +1,43 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO.Ports;
 using System.Threading;
 
 namespace RsLoopTest
 {
     internal sealed class SerialLoopController : IDisposable
     {
+        private sealed class PendingFrame
+        {
+            public uint Sequence;
+            public PayloadPattern Pattern;
+            public uint Seed;
+            public byte[] Payload;
+            public byte[] RawBytes;
+            public long SentTimestamp;
+            public int TimeoutMilliseconds;
+        }
+
         private readonly object syncRoot = new object();
-        private SerialPort portA;
-        private SerialPort portB;
-        private FrameBuffer bufferA;
-        private FrameBuffer bufferB;
-        private byte[] expected;
+        private readonly AutoResetEvent senderSignal = new AutoResetEvent(false);
+        private readonly Stopwatch elapsed = new Stopwatch();
+        private readonly Dictionary<uint, PendingFrame> pending = new Dictionary<uint, PendingFrame>();
+        private readonly HashSet<uint> finalizedAhead = new HashSet<uint>();
+        private readonly HashSet<uint> recentReceived = new HashSet<uint>();
+        private readonly Queue<uint> recentReceivedOrder = new Queue<uint>();
+        private LoopTransport transportA;
+        private LoopTransport transportB;
+        private LoopFrameParser parserA;
+        private LoopFrameParser parserB;
         private LoopDataOptions dataOptions;
         private PayloadGenerator payloadGenerator;
-        private Timer timeoutTimer;
-        private Stopwatch elapsed = new Stopwatch();
-        private Stopwatch roundTrip = new Stopwatch();
+        private Thread senderThread;
+        private LoopTestMode mode;
+        private int baudRate;
+        private int requestedTimeoutMilliseconds;
+        private int windowSize;
+        private uint nextSequence;
+        private uint nextExpectedSequence;
         private long aSent;
         private long aReceivedOk;
         private long aReceivedError;
@@ -25,12 +45,17 @@ namespace RsLoopTest
         private long bReceivedError;
         private long bSent;
         private long totalBytes;
+        private long crcErrors;
+        private long headerErrors;
+        private long resynchronizedBytes;
+        private long lostFrames;
+        private long duplicateFrames;
+        private long outOfOrderFrames;
+        private long errorBytes;
+        private long errorBits;
+        private long latencySamples;
         private double totalRoundTripMilliseconds;
         private double lastRoundTripMilliseconds;
-        private int timeoutMilliseconds;
-        private int requestedTimeoutMilliseconds;
-        private int baudRate;
-        private LoopTestMode mode;
         private bool isRunning;
         private bool disposed;
         private string stopReason = "未启动";
@@ -38,32 +63,11 @@ namespace RsLoopTest
         public event Action<string, bool> LogAvailable;
         public event Action<string> TestStopped;
 
-        public void Start(string portAName, string portBName, int baudRate, LoopDataOptions options,
+        public void Start(TransportSettings endpointA, TransportSettings endpointB,
+            int baudRate, LoopDataOptions options,
             int responseTimeoutMilliseconds, LoopTestMode mode)
         {
-            if (string.IsNullOrWhiteSpace(portAName))
-            {
-                throw new ArgumentException("必须选择端口 A。", "portAName");
-            }
-            if (mode == LoopTestMode.DualPortRelay && string.IsNullOrWhiteSpace(portBName))
-            {
-                throw new ArgumentException("双端口模式必须选择端口 B。", "portBName");
-            }
-            if (mode == LoopTestMode.DualPortRelay &&
-                string.Equals(portAName, portBName, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new ArgumentException("端口 A 和端口 B 不能选择同一个串口。");
-            }
-            if (options == null)
-            {
-                throw new ArgumentNullException("options");
-            }
-            options.Validate();
-
-            int startingFrameLength = 0;
-            int startingTimeout = 0;
-            string startingFrameHex = string.Empty;
-
+            ValidateStartArguments(endpointA, endpointB, options, mode);
             try
             {
                 lock (syncRoot)
@@ -74,91 +78,79 @@ namespace RsLoopTest
                         throw new InvalidOperationException("测试已在运行中。");
                     }
 
-                    ResetCounters();
+                    ResetState();
                     dataOptions = options.Clone();
                     payloadGenerator = new PayloadGenerator(dataOptions);
                     this.baudRate = baudRate;
                     this.mode = mode;
                     requestedTimeoutMilliseconds = responseTimeoutMilliseconds;
-                    portA = CreatePort(portAName, baudRate);
-                    portA.DataReceived += PortADataReceived;
+                    bool allNetwork = !endpointA.IsSerial &&
+                        (mode == LoopTestMode.SinglePortFullDuplex || !endpointB.IsSerial);
+                    windowSize = allNetwork ? 32 : CalculateWindowSize(baudRate);
+                    parserA = new LoopFrameParser();
+                    parserB = mode == LoopTestMode.DualPortRelay ? new LoopFrameParser() : null;
+
+                    transportA = LoopTransportFactory.Create(endpointA, baudRate);
+                    AttachTransport(transportA, true);
                     if (mode == LoopTestMode.DualPortRelay)
                     {
-                        portB = CreatePort(portBName, baudRate);
-                        portB.DataReceived += PortBDataReceived;
-                        portB.Open();
+                        transportB = LoopTransportFactory.Create(endpointB, baudRate);
+                        AttachTransport(transportB, false);
                     }
-                    portA.Open();
-                    if (portB != null)
-                    {
-                        portB.DiscardInBuffer();
-                        portB.DiscardOutBuffer();
-                    }
-                    portA.DiscardInBuffer();
-                    portA.DiscardOutBuffer();
+                    OpenTransports();
+                    ClearTransportBuffers();
+
                     isRunning = true;
                     stopReason = string.Empty;
                     elapsed.Restart();
-                    timeoutTimer = new Timer(CheckTimeout, null, 200, 200);
-                    BeginNextRound();
-                    startingFrameLength = expected.Length;
-                    startingTimeout = timeoutMilliseconds;
-                    startingFrameHex = PayloadCodec.ToHex(expected);
+                    senderThread = new Thread(SenderLoop);
+                    senderThread.IsBackground = true;
+                    senderThread.Name = "SerialLoopSender";
+                    senderThread.Start();
                 }
             }
             catch
             {
-                SerialPort closingPortA;
-                SerialPort closingPortB;
-                lock (syncRoot)
-                {
-                    isRunning = false;
-                    elapsed.Stop();
-                    roundTrip.Stop();
-                    DisposeTimer();
-                    closingPortA = portA;
-                    closingPortB = portB;
-                    portA = null;
-                    portB = null;
-                }
-                ClosePort(closingPortA, PortADataReceived);
-                ClosePort(closingPortB, PortBDataReceived);
+                CleanupAfterStartFailure();
                 throw;
             }
 
-            int wirePasses = mode == LoopTestMode.SinglePortFullDuplex ? 1 : 2;
-            int wireMilliseconds = SerialTiming.CalculateWireMilliseconds(startingFrameLength,
-                baudRate, wirePasses);
             string modeName = mode == LoopTestMode.SinglePortFullDuplex
-                ? "单端口全双工自环" : "双端口中继环回";
-            EmitLog("测试已启动：" + modeName + "，" + baudRate + " baud，" + dataOptions.Describe() +
-                "；首帧 " + startingFrameLength +
-                " 字节，理论线路耗时约 " + wireMilliseconds + " ms，实际超时 " +
-                startingTimeout + " ms。", false);
-            EmitLog("A 端发送首帧：" + startingFrameHex, false);
+                ? "单端点全双工/自环" : "双端点中继环回";
+            string endpoints = mode == LoopTestMode.SinglePortFullDuplex
+                ? endpointA.Describe() : endpointA.Describe() + " ⇄ " + endpointB.Describe();
+            EmitLog("测试已启动：" + modeName + "，" + endpoints +
+                (endpointA.IsSerial || (endpointB != null && endpointB.IsSerial)
+                    ? "，串口 " + baudRate + " baud" : string.Empty) + "，" +
+                dataOptions.Describe() + "，初始种子 0x" + dataOptions.DataSeed.ToString("X8") +
+                "，在途窗口 " + windowSize + " 帧。", false);
+            EmitLog("协议：RSLP v1，序号 + 长度 + 帧起始种子 + 头部 CRC32 + 整帧 CRC32。", false);
         }
 
         public void Stop(string reason)
         {
             bool shouldNotify;
-            SerialPort closingPortA;
-            SerialPort closingPortB;
+            LoopTransport closingTransportA;
+            LoopTransport closingTransportB;
+            Thread closingSender;
             lock (syncRoot)
             {
                 shouldNotify = isRunning;
                 isRunning = false;
                 stopReason = string.IsNullOrWhiteSpace(reason) ? "用户停止" : reason;
                 elapsed.Stop();
-                roundTrip.Stop();
-                DisposeTimer();
-                closingPortA = portA;
-                closingPortB = portB;
-                portA = null;
-                portB = null;
+                closingTransportA = transportA;
+                closingTransportB = transportB;
+                closingSender = senderThread;
+                transportA = null;
+                transportB = null;
+                senderThread = null;
+                senderSignal.Set();
             }
 
-            ClosePort(closingPortA, PortADataReceived);
-            ClosePort(closingPortB, PortBDataReceived);
+            CloseTransport(closingTransportA, true);
+            CloseTransport(closingTransportB, false);
+            JoinSender(closingSender);
 
             if (shouldNotify)
             {
@@ -186,187 +178,378 @@ namespace RsLoopTest
                     BReceivedError = bReceivedError,
                     BSent = bSent,
                     TotalBytes = totalBytes,
+                    CrcErrors = crcErrors,
+                    HeaderErrors = headerErrors,
+                    ResynchronizedBytes = resynchronizedBytes,
+                    LostFrames = lostFrames,
+                    DuplicateFrames = duplicateFrames,
+                    OutOfOrderFrames = outOfOrderFrames,
+                    ErrorBytes = errorBytes,
+                    ErrorBits = errorBits,
+                    InFlightFrames = pending.Count,
+                    WindowSize = windowSize,
                     Elapsed = elapsed.Elapsed,
                     LastRoundTripMilliseconds = lastRoundTripMilliseconds,
-                    AverageRoundTripMilliseconds = aReceivedOk == 0
-                        ? 0.0 : totalRoundTripMilliseconds / aReceivedOk,
+                    AverageRoundTripMilliseconds = latencySamples == 0
+                        ? 0.0 : totalRoundTripMilliseconds / latencySamples,
                     StopReason = stopReason
                 };
             }
         }
 
-        private static SerialPort CreatePort(string portName, int baudRate)
+        private static void ValidateStartArguments(TransportSettings endpointA,
+            TransportSettings endpointB,
+            LoopDataOptions options, LoopTestMode mode)
         {
-            return new SerialPort(portName, baudRate, Parity.None, 8, StopBits.One)
+            if (endpointA == null) throw new ArgumentNullException("endpointA");
+            endpointA.Validate();
+            if (mode == LoopTestMode.DualPortRelay && endpointB == null)
+                throw new ArgumentException("双端口模式必须配置端点 B。");
+            if (endpointB != null) endpointB.Validate();
+            if (mode == LoopTestMode.DualPortRelay && endpointA.IsSerial && endpointB.IsSerial &&
+                string.Equals(endpointA.SerialPortName, endpointB.SerialPortName,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("端口 A 和端口 B 不能选择同一个串口。");
+            if (options == null) throw new ArgumentNullException("options");
+            options.Validate();
+        }
+
+        private static int CalculateWindowSize(int rate)
+        {
+            if (rate <= 1200) return 2;
+            if (rate <= 9600) return 4;
+            if (rate <= 115200) return 8;
+            if (rate <= 921600) return 16;
+            return 32;
+        }
+
+        private void SenderLoop()
+        {
+            while (true)
             {
-                Handshake = Handshake.None,
-                ReadTimeout = 1000,
-                WriteTimeout = 1000,
-                DtrEnable = false,
-                RtsEnable = false,
-                ReceivedBytesThreshold = 1
-            };
+                PendingFrame frameToSend = null;
+                LoopTransport sendingTransport = null;
+                try
+                {
+                    lock (syncRoot)
+                    {
+                        if (!isRunning) return;
+                        ExpireTimedOutFrames();
+                        if (pending.Count < windowSize && transportA != null && transportA.IsReady)
+                        {
+                            GeneratedPayload generated = payloadGenerator.CreateNextFrame();
+                            uint sequence = nextSequence++;
+                            byte[] raw = LoopFrameCodec.Build(sequence, dataOptions.Pattern,
+                                generated.StartSeed, generated.Data);
+                            int serialPasses = (transportA.IsSerial ? 1 : 0) +
+                                (mode == LoopTestMode.DualPortRelay && transportB != null &&
+                                    transportB.IsSerial ? 1 : 0);
+                            int timeout = requestedTimeoutMilliseconds;
+                            if (serialPasses > 0)
+                            {
+                                int wireMilliseconds = SerialTiming.CalculateWireMilliseconds(
+                                    raw.Length, baudRate, serialPasses);
+                                timeout = SerialTiming.CalculateEffectiveTimeoutMilliseconds(
+                                    raw.Length, baudRate, requestedTimeoutMilliseconds, serialPasses) +
+                                    wireMilliseconds * windowSize;
+                            }
+                            frameToSend = new PendingFrame
+                            {
+                                Sequence = sequence,
+                                Pattern = dataOptions.Pattern,
+                                Seed = generated.StartSeed,
+                                Payload = generated.Data,
+                                RawBytes = raw,
+                                SentTimestamp = Stopwatch.GetTimestamp(),
+                                TimeoutMilliseconds = timeout
+                            };
+                            pending.Add(sequence, frameToSend);
+                            aSent++;
+                            sendingTransport = transportA;
+                        }
+                    }
+
+                    if (frameToSend != null)
+                    {
+                        if (sendingTransport == null || !sendingTransport.TryWrite(
+                            frameToSend.RawBytes, 0, frameToSend.RawBytes.Length))
+                        {
+                            lock (syncRoot)
+                            {
+                                pending.Remove(frameToSend.Sequence);
+                                aSent--;
+                                MarkFinalized(frameToSend.Sequence);
+                            }
+                            senderSignal.WaitOne(20);
+                            continue;
+                        }
+                        if (frameToSend.Sequence == 0)
+                        {
+                            EmitLog("首帧：序号 0，载荷 " + frameToSend.Payload.Length +
+                                " 字节，帧种子 0x" + frameToSend.Seed.ToString("X8") +
+                                "，线路帧 " + frameToSend.RawBytes.Length + " 字节。", false);
+                        }
+                        continue;
+                    }
+                    senderSignal.WaitOne(20);
+                }
+                catch (Exception exception)
+                {
+                    FailAsync("发送线程失败：" + exception.Message);
+                    return;
+                }
+            }
         }
 
-        private void PortADataReceived(object sender, SerialDataReceivedEventArgs eventArgs)
+        private void ExpireTimedOutFrames()
         {
-            ReadAvailable(sender as SerialPort, true, ProcessAFrame, "A");
+            if (pending.Count == 0) return;
+            long now = Stopwatch.GetTimestamp();
+            List<uint> expired = new List<uint>();
+            foreach (KeyValuePair<uint, PendingFrame> item in pending)
+            {
+                if (ElapsedMilliseconds(item.Value.SentTimestamp, now) > item.Value.TimeoutMilliseconds)
+                    expired.Add(item.Key);
+            }
+            foreach (uint sequence in expired)
+            {
+                PendingFrame frame = pending[sequence];
+                pending.Remove(sequence);
+                lostFrames++;
+                aReceivedError++;
+                MarkFinalized(sequence);
+                EmitSampledError("序号 " + sequence + " 超时，判定丢帧（" +
+                    frame.TimeoutMilliseconds + " ms），测试继续。", lostFrames);
+            }
         }
 
-        private void PortBDataReceived(object sender, SerialDataReceivedEventArgs eventArgs)
+        private void TransportADataReceived(byte[] data, int count)
         {
-            ReadAvailable(sender as SerialPort, false, ProcessBFrame, "B");
+            ReceiveData(data, count, true);
         }
 
-        private void ReadAvailable(SerialPort port, bool isPortA, Action processFrame, string side)
+        private void TransportBDataReceived(byte[] data, int count)
+        {
+            ReceiveData(data, count, false);
+        }
+
+        private void ReceiveData(byte[] incoming, int count, bool isPortA)
         {
             try
             {
                 lock (syncRoot)
                 {
-                    SerialPort currentPort = isPortA ? portA : portB;
-                    FrameBuffer currentBuffer = isPortA ? bufferA : bufferB;
-                    if (!isRunning || port == null || !ReferenceEquals(port, currentPort) ||
-                        currentBuffer == null || !port.IsOpen)
+                    LoopFrameParser parser = isPortA ? parserA : parserB;
+                    if (!isRunning || incoming == null || count <= 0 || parser == null) return;
+                    totalBytes += count;
+                    FrameParseBatch batch = parser.Append(incoming, count);
+                    headerErrors += batch.HeaderErrors;
+                    resynchronizedBytes += batch.DiscardedBytes;
+                    if (batch.HeaderErrors > 0)
                     {
-                        return;
+                        EmitSampledError((isPortA ? "A" : "B") + " 端检测到 " +
+                            batch.HeaderErrors + " 个无效帧头并重新同步。", headerErrors);
                     }
-
-                    int available = port.BytesToRead;
-                    if (available <= 0)
+                    foreach (LoopFrame frame in batch.Frames)
                     {
-                        return;
+                        if (isPortA) ProcessAFrame(frame); else ProcessBFrame(frame);
                     }
-
-                    byte[] incoming = new byte[available];
-                    int read = port.Read(incoming, 0, incoming.Length);
-                    currentBuffer.Append(incoming, read);
-                    totalBytes += read;
-                    processFrame();
                 }
             }
             catch (Exception exception)
             {
-                FailAsync(side + " 端串口读取失败：" + exception.Message);
+                FailAsync((isPortA ? "A" : "B") + " 端串口读取失败：" + exception.Message);
             }
         }
 
-        private void ProcessBFrame()
+        private void ProcessBFrame(LoopFrame frame)
         {
-            byte[] frame;
-            if (!isRunning || !bufferB.TryTakeFrame(out frame))
-            {
-                return;
-            }
-
-            if (PayloadCodec.AreEqual(expected, frame))
-            {
-                bReceivedOk++;
-            }
+            PendingFrame expectedFrame;
+            bool hasExpected = pending.TryGetValue(frame.Sequence, out expectedFrame);
+            bool payloadMatches = hasExpected && PayloadCodec.AreEqual(expectedFrame.Payload, frame.Payload);
+            bool metadataMatches = hasExpected && expectedFrame.Pattern == frame.Pattern &&
+                expectedFrame.Seed == frame.Seed;
+            bool correct = frame.FrameCrcValid && payloadMatches && metadataMatches;
+            if (!frame.FrameCrcValid) crcErrors++;
+            if (correct) bReceivedOk++;
             else
             {
                 bReceivedError++;
-                EmitValidationError("B", frame, bReceivedError);
+                EmitSampledError("B 端帧校验失败，序号 " + frame.Sequence + "，CRC=" +
+                    (frame.FrameCrcValid ? "正确" : "错误") + "，仍原样回传。", bReceivedError);
             }
-
-            // 无论校验是否正确，B 都回传实际收到的数据。
-            portB.Write(frame, 0, frame.Length);
-            bSent++;
+            if (transportB != null && transportB.TryWrite(frame.RawBytes, 0, frame.RawBytes.Length))
+                bSent++;
+            else
+                EmitSampledError("B 端当前未连接，序号 " + frame.Sequence + " 未能回传。",
+                    bReceivedError + 1);
         }
 
-        private void ProcessAFrame()
+        private void ProcessAFrame(LoopFrame frame)
         {
-            byte[] frame;
-            if (!isRunning || !bufferA.TryTakeFrame(out frame))
+            PendingFrame expectedFrame;
+            if (!pending.TryGetValue(frame.Sequence, out expectedFrame))
             {
+                if (recentReceived.Contains(frame.Sequence))
+                {
+                    duplicateFrames++;
+                    EmitSampledError("收到重复帧，序号 " + frame.Sequence + "。", duplicateFrames);
+                }
+                else
+                {
+                    outOfOrderFrames++;
+                    aReceivedError++;
+                    EmitSampledError("收到不在当前窗口内的帧，序号 " + frame.Sequence + "。",
+                        outOfOrderFrames);
+                    RememberReceived(frame.Sequence);
+                }
+                if (!frame.FrameCrcValid) crcErrors++;
                 return;
             }
 
-            roundTrip.Stop();
-            lastRoundTripMilliseconds = roundTrip.Elapsed.TotalMilliseconds;
+            pending.Remove(frame.Sequence);
+            if (frame.Sequence != nextExpectedSequence) outOfOrderFrames++;
+            long now = Stopwatch.GetTimestamp();
+            lastRoundTripMilliseconds = ElapsedMilliseconds(expectedFrame.SentTimestamp, now);
+            totalRoundTripMilliseconds += lastRoundTripMilliseconds;
+            latencySamples++;
 
-            if (PayloadCodec.AreEqual(expected, frame))
-            {
-                aReceivedOk++;
-                totalRoundTripMilliseconds += lastRoundTripMilliseconds;
-            }
+            long frameErrorBytes;
+            long frameErrorBits;
+            CountDifferences(expectedFrame.Payload, frame.Payload, out frameErrorBytes, out frameErrorBits);
+            errorBytes += frameErrorBytes;
+            errorBits += frameErrorBits;
+            bool metadataMatches = expectedFrame.Pattern == frame.Pattern &&
+                expectedFrame.Seed == frame.Seed && expectedFrame.Payload.Length == frame.PayloadLength;
+            bool correct = frame.FrameCrcValid && metadataMatches && frameErrorBytes == 0;
+            if (!frame.FrameCrcValid) crcErrors++;
+            if (correct) aReceivedOk++;
             else
             {
                 aReceivedError++;
-                EmitValidationError("A", frame, aReceivedError);
+                EmitSampledError("A 端帧校验失败，序号 " + frame.Sequence + "，CRC=" +
+                    (frame.FrameCrcValid ? "正确" : "错误") + "，错误字节 " +
+                    frameErrorBytes + "，错误位 " + frameErrorBits + "。", aReceivedError);
             }
-
-            // 校验结果只影响统计，不再阻断下一轮发送。
-            BeginNextRound();
+            MarkFinalized(frame.Sequence);
+            RememberReceived(frame.Sequence);
+            senderSignal.Set();
         }
 
-        private void BeginNextRound()
+        private void MarkFinalized(uint sequence)
         {
-            expected = payloadGenerator.CreateNext();
-            bufferA = new FrameBuffer(expected.Length);
-            bufferB = mode == LoopTestMode.DualPortRelay ? new FrameBuffer(expected.Length) : null;
-            int wirePasses = mode == LoopTestMode.SinglePortFullDuplex ? 1 : 2;
-            timeoutMilliseconds = SerialTiming.CalculateEffectiveTimeoutMilliseconds(
-                expected.Length, baudRate, requestedTimeoutMilliseconds, wirePasses);
-            portA.Write(expected, 0, expected.Length);
-            aSent++;
-            roundTrip.Restart();
+            finalizedAhead.Add(sequence);
+            while (finalizedAhead.Remove(nextExpectedSequence)) nextExpectedSequence++;
         }
 
-        private void CheckTimeout(object state)
+        private void RememberReceived(uint sequence)
         {
-            try
+            if (recentReceived.Add(sequence))
             {
-                lock (syncRoot)
-                {
-                    if (!isRunning || !roundTrip.IsRunning)
-                    {
-                        return;
-                    }
+                recentReceivedOrder.Enqueue(sequence);
+                while (recentReceivedOrder.Count > 4096)
+                    recentReceived.Remove(recentReceivedOrder.Dequeue());
+            }
+        }
 
-                    if (roundTrip.ElapsedMilliseconds > timeoutMilliseconds)
-                    {
-                        aReceivedError++;
-                        EmitLog("本轮回传超时，已跳过并继续（阈值 " + timeoutMilliseconds +
-                            " ms，帧长 " + expected.Length + " 字节，A 错误累计 " +
-                            aReceivedError + "）。", true);
-                        DiscardPendingInput();
-                        BeginNextRound();
-                    }
+        internal static void CountDifferences(byte[] expected, byte[] actual,
+            out long differentBytes, out long differentBits)
+        {
+            differentBytes = 0;
+            differentBits = 0;
+            int commonLength = Math.Min(expected.Length, actual.Length);
+            for (int index = 0; index < commonLength; index++)
+            {
+                byte difference = (byte)(expected[index] ^ actual[index]);
+                if (difference != 0)
+                {
+                    differentBytes++;
+                    differentBits += CountSetBits(difference);
                 }
             }
-            catch (Exception exception)
+            for (int index = commonLength; index < expected.Length; index++)
             {
-                FailAsync("超时恢复时串口操作失败：" + exception.Message);
+                differentBytes++;
+                differentBits += 8;
+            }
+            for (int index = commonLength; index < actual.Length; index++)
+            {
+                differentBytes++;
+                differentBits += 8;
             }
         }
 
-        private void DiscardPendingInput()
+        private static int CountSetBits(byte value)
         {
-            bufferA.Clear();
-            if (bufferB != null)
+            int count = 0;
+            while (value != 0)
             {
-                bufferB.Clear();
+                value &= (byte)(value - 1);
+                count++;
             }
-            if (portA != null && portA.IsOpen)
+            return count;
+        }
+
+        private static double ElapsedMilliseconds(long start, long end)
+        {
+            return (end - start) * 1000.0 / Stopwatch.Frequency;
+        }
+
+        private void AttachTransport(LoopTransport transport, bool isEndpointA)
+        {
+            if (isEndpointA)
             {
-                portA.DiscardInBuffer();
+                transport.DataReceived += TransportADataReceived;
+                transport.Faulted += TransportAFaulted;
+                transport.StatusChanged += TransportAStatusChanged;
             }
-            if (portB != null && portB.IsOpen)
+            else
             {
-                portB.DiscardInBuffer();
+                transport.DataReceived += TransportBDataReceived;
+                transport.Faulted += TransportBFaulted;
+                transport.StatusChanged += TransportBStatusChanged;
             }
         }
 
-        private void EmitValidationError(string side, byte[] actual, long sideErrorCount)
+        private void OpenTransports()
         {
-            long totalErrors = aReceivedError + bReceivedError;
-            if (totalErrors <= 10 || totalErrors % 100 == 0)
-            {
-                EmitLog(side + " 端校验失败（该端累计 " + sideErrorCount + "），收到：" +
-                    PayloadCodec.ToHex(actual) + "；预期：" + PayloadCodec.ToHex(expected) +
-                    "。测试继续运行。", true);
-            }
+            if (transportA != null && transportA.IsServer) transportA.Open();
+            if (transportB != null && transportB.IsServer) transportB.Open();
+            if (transportB != null && !transportB.IsServer) transportB.Open();
+            if (transportA != null && !transportA.IsServer) transportA.Open();
+        }
+
+        private void ClearTransportBuffers()
+        {
+            if (transportB != null) transportB.ClearBuffers();
+            if (transportA != null) transportA.ClearBuffers();
+        }
+
+        private void TransportAFaulted(Exception exception)
+        {
+            FailAsync("端点 A 读取失败：" + exception.Message);
+        }
+
+        private void TransportBFaulted(Exception exception)
+        {
+            FailAsync("端点 B 读取失败：" + exception.Message);
+        }
+
+        private void TransportAStatusChanged(string message)
+        {
+            EmitLog("端点 A：" + message, false);
+            senderSignal.Set();
+        }
+
+        private void TransportBStatusChanged(string message)
+        {
+            EmitLog("端点 B：" + message, false);
+        }
+
+        private void EmitSampledError(string message, long errorNumber)
+        {
+            long total = aReceivedError + bReceivedError + headerErrors + lostFrames;
+            if (total <= 20 || errorNumber % 100 == 0) EmitLog(message, true);
         }
 
         private void FailAsync(string reason)
@@ -378,111 +561,116 @@ namespace RsLoopTest
                 {
                     isRunning = false;
                     stopReason = reason;
+                    senderSignal.Set();
                     queueStop = true;
                 }
             }
-
-            if (queueStop)
+            if (!queueStop) return;
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                ThreadPool.QueueUserWorkItem(delegate
+                LoopTransport closingTransportA;
+                LoopTransport closingTransportB;
+                Thread closingSender;
+                lock (syncRoot)
                 {
-                    SerialPort closingPortA;
-                    SerialPort closingPortB;
-                    lock (syncRoot)
-                    {
-                        elapsed.Stop();
-                        roundTrip.Stop();
-                        DisposeTimer();
-                        closingPortA = portA;
-                        closingPortB = portB;
-                        portA = null;
-                        portB = null;
-                    }
-                    ClosePort(closingPortA, PortADataReceived);
-                    ClosePort(closingPortB, PortBDataReceived);
-                    EmitLog("测试异常停止：" + reason, true);
-                    Action<string> handler = TestStopped;
-                    if (handler != null)
-                    {
-                        handler(reason);
-                    }
-                });
-            }
+                    elapsed.Stop();
+                    closingTransportA = transportA;
+                    closingTransportB = transportB;
+                    closingSender = senderThread;
+                    transportA = null;
+                    transportB = null;
+                    senderThread = null;
+                }
+                CloseTransport(closingTransportA, true);
+                CloseTransport(closingTransportB, false);
+                JoinSender(closingSender);
+                EmitLog("测试异常停止：" + reason, true);
+                Action<string> handler = TestStopped;
+                if (handler != null) handler(reason);
+            });
         }
 
-        private void ResetCounters()
+        private void CleanupAfterStartFailure()
         {
-            aSent = 0;
-            aReceivedOk = 0;
-            aReceivedError = 0;
-            bReceivedOk = 0;
-            bReceivedError = 0;
-            bSent = 0;
-            totalBytes = 0;
-            totalRoundTripMilliseconds = 0.0;
-            lastRoundTripMilliseconds = 0.0;
-            elapsed.Reset();
-            roundTrip.Reset();
-        }
-
-        private static void ClosePort(SerialPort port, SerialDataReceivedEventHandler handler)
-        {
-            if (port == null)
+            LoopTransport closingTransportA;
+            LoopTransport closingTransportB;
+            Thread closingSender;
+            lock (syncRoot)
             {
-                return;
+                isRunning = false;
+                elapsed.Stop();
+                closingTransportA = transportA;
+                closingTransportB = transportB;
+                closingSender = senderThread;
+                transportA = null;
+                transportB = null;
+                senderThread = null;
+                senderSignal.Set();
             }
+            CloseTransport(closingTransportA, true);
+            CloseTransport(closingTransportB, false);
+            JoinSender(closingSender);
+        }
 
+        private void ResetState()
+        {
+            aSent = aReceivedOk = aReceivedError = 0;
+            bReceivedOk = bReceivedError = bSent = 0;
+            totalBytes = crcErrors = headerErrors = resynchronizedBytes = 0;
+            lostFrames = duplicateFrames = outOfOrderFrames = 0;
+            errorBytes = errorBits = latencySamples = 0;
+            totalRoundTripMilliseconds = lastRoundTripMilliseconds = 0.0;
+            nextSequence = nextExpectedSequence = 0;
+            pending.Clear();
+            finalizedAhead.Clear();
+            recentReceived.Clear();
+            recentReceivedOrder.Clear();
+            elapsed.Reset();
+        }
+
+        private void CloseTransport(LoopTransport transport, bool isEndpointA)
+        {
+            if (transport == null) return;
             try
             {
-                port.DataReceived -= handler;
-                if (port.IsOpen)
+                if (isEndpointA)
                 {
-                    port.Close();
+                    transport.DataReceived -= TransportADataReceived;
+                    transport.Faulted -= TransportAFaulted;
+                    transport.StatusChanged -= TransportAStatusChanged;
+                }
+                else
+                {
+                    transport.DataReceived -= TransportBDataReceived;
+                    transport.Faulted -= TransportBFaulted;
+                    transport.StatusChanged -= TransportBStatusChanged;
                 }
             }
-            catch
-            {
-            }
-            finally
-            {
-                port.Dispose();
-            }
+            catch { }
+            finally { transport.Dispose(); }
         }
 
-        private void DisposeTimer()
+        private static void JoinSender(Thread thread)
         {
-            Timer timer = timeoutTimer;
-            timeoutTimer = null;
-            if (timer != null)
-            {
-                timer.Dispose();
-            }
+            if (thread != null && thread != Thread.CurrentThread && thread.IsAlive) thread.Join(2000);
         }
 
         private void EmitLog(string message, bool isError)
         {
             Action<string, bool> handler = LogAvailable;
-            if (handler != null)
-            {
-                handler(message, isError);
-            }
+            if (handler != null) handler(message, isError);
         }
 
         private void ThrowIfDisposed()
         {
-            if (disposed)
-            {
-                throw new ObjectDisposedException("SerialLoopController");
-            }
+            if (disposed) throw new ObjectDisposedException("SerialLoopController");
         }
 
         public void Dispose()
         {
-            if (disposed)
-            {
-                return;
-            }
+            if (disposed) return;
             Stop("窗口关闭");
+            senderSignal.Dispose();
             disposed = true;
         }
     }

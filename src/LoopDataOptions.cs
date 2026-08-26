@@ -8,7 +8,10 @@ namespace RsLoopTest
         Fixed55,
         FixedAA,
         Alternating55AA,
-        CustomRepeat
+        CustomRepeat,
+        Prbs7,
+        Prbs15,
+        Prbs31
     }
 
     internal sealed class LoopDataOptions
@@ -20,6 +23,7 @@ namespace RsLoopTest
         public bool RandomContent { get; set; }
         public bool RandomFrameLength { get; set; }
         public byte[] CustomPattern { get; set; }
+        public uint DataSeed { get; set; }
 
         public void Validate()
         {
@@ -52,7 +56,8 @@ namespace RsLoopTest
                 FrameLength = FrameLength,
                 RandomContent = RandomContent,
                 RandomFrameLength = RandomFrameLength,
-                CustomPattern = CustomPattern == null ? null : (byte[])CustomPattern.Clone()
+                CustomPattern = CustomPattern == null ? null : (byte[])CustomPattern.Clone(),
+                DataSeed = DataSeed
             };
         }
 
@@ -75,6 +80,12 @@ namespace RsLoopTest
                     return "55/AA 交替";
                 case PayloadPattern.CustomRepeat:
                     return "自定义 HEX 循环";
+                case PayloadPattern.Prbs7:
+                    return "PRBS7";
+                case PayloadPattern.Prbs15:
+                    return "PRBS15";
+                case PayloadPattern.Prbs31:
+                    return "PRBS31";
                 default:
                     return "递增 00-FF";
             }

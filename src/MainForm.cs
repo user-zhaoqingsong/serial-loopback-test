@@ -20,12 +20,19 @@ namespace RsLoopTest
         private readonly Timer displayTimer = new Timer();
         private ComboBox portACombo;
         private ComboBox portBCombo;
+        private ComboBox transportACombo;
+        private ComboBox transportBCombo;
+        private TextBox endpointAInput;
+        private TextBox endpointBInput;
+        private Label endpointALabel;
+        private Label endpointBLabel;
         private ComboBox modeCombo;
         private ComboBox baudCombo;
         private NumericUpDown timeoutInput;
         private ComboBox patternCombo;
         private ComboBox frameLengthCombo;
         private TextBox customPatternInput;
+        private NumericUpDown dataSeedInput;
         private CheckBox randomContentCheck;
         private CheckBox randomFrameLengthCheck;
         private Button startButton;
@@ -35,11 +42,15 @@ namespace RsLoopTest
         private Label statusLabel;
         private RichTextBox logBox;
         private Label aSentValue;
-        private Label bOkValue;
-        private Label bErrorValue;
-        private Label bSentValue;
         private Label aOkValue;
         private Label aErrorValue;
+        private Label crcErrorValue;
+        private Label lostValue;
+        private Label duplicateValue;
+        private Label outOfOrderValue;
+        private Label inFlightValue;
+        private Label errorBytesValue;
+        private Label errorBitsValue;
         private Label elapsedValue;
         private Label latencyValue;
         private GroupBox portAGroup;
@@ -66,11 +77,12 @@ namespace RsLoopTest
         {
             Text = "串口环回测试";
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(980, 720);
-            Size = new Size(1120, 800);
+            MinimumSize = new Size(980, 780);
+            Size = new Size(1120, 860);
             BackColor = Background;
             Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
             AutoScaleMode = AutoScaleMode.Dpi;
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         }
 
         private void BuildInterface()
@@ -84,7 +96,7 @@ namespace RsLoopTest
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82F));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 202F));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58F));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 172F));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 240F));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             Controls.Add(root);
 
@@ -112,7 +124,7 @@ namespace RsLoopTest
             panel.Controls.Add(title);
 
             headerSubtitle = new Label();
-            headerSubtitle.Text = "A 发送 → B 校验并回传 → A 校验 → 自动进入下一轮";
+            headerSubtitle.Text = "A 连续发送多帧 → B 校验并回传 → A 按序校验与统计";
             headerSubtitle.ForeColor = Color.FromArgb(203, 213, 225);
             headerSubtitle.Font = new Font(Font.FontFamily, 9.5F);
             headerSubtitle.AutoSize = true;
@@ -143,9 +155,11 @@ namespace RsLoopTest
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 48F));
             layout.Margin = new Padding(0);
 
-            portAGroup = BuildPortGroup("端口 A · 主动发送端", out portACombo, out portAHint,
+            portAGroup = BuildPortGroup("端点 A · 主动发送端", true, out transportACombo,
+                out portACombo, out endpointAInput, out endpointALabel, out portAHint,
                 "发送预设数据，并校验接收到的环回内容");
-            portBGroup = BuildPortGroup("端口 B · 回传端", out portBCombo, out portBHint,
+            portBGroup = BuildPortGroup("端点 B · 回传端", false, out transportBCombo,
+                out portBCombo, out endpointBInput, out endpointBLabel, out portBHint,
                 "接收并校验 A 端数据，无论结果均原样回传");
             layout.Controls.Add(portAGroup, 0, 0);
             layout.Controls.Add(portBGroup, 1, 0);
@@ -153,46 +167,66 @@ namespace RsLoopTest
             return layout;
         }
 
-        private GroupBox BuildPortGroup(string titleText, out ComboBox combo,
-            out Label descriptionLabel, string description)
+        private GroupBox BuildPortGroup(string titleText, bool isEndpointA,
+            out ComboBox transportCombo, out ComboBox serialCombo, out TextBox endpointInput,
+            out Label endpointLabel, out Label descriptionLabel, string description)
         {
             GroupBox group = CreateGroup(titleText);
             group.Margin = new Padding(0, 0, 12, 12);
 
-            Label portLabel = CreateFieldLabel("串口号");
-            portLabel.Location = new Point(18, 36);
-            group.Controls.Add(portLabel);
+            Label typeLabel = CreateFieldLabel("传输类型");
+            typeLabel.Location = new Point(18, 32);
+            group.Controls.Add(typeLabel);
 
-            combo = new ComboBox();
-            combo.DropDownStyle = ComboBoxStyle.DropDownList;
-            combo.Font = new Font(Font.FontFamily, 11F, FontStyle.Bold);
-            combo.Location = new Point(18, 61);
-            combo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            combo.Width = group.Width - 36;
-            group.Controls.Add(combo);
-            ComboBox resizingCombo = combo;
+            transportCombo = new ComboBox();
+            transportCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            transportCombo.Items.AddRange(new object[] { "串口", "TCP Client", "TCP Server", "UDP" });
+            transportCombo.SelectedIndex = 0;
+            transportCombo.Location = new Point(18, 52);
+            transportCombo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            transportCombo.Width = group.Width - 36;
+            group.Controls.Add(transportCombo);
+
+            endpointLabel = CreateFieldLabel("串口号");
+            endpointLabel.Location = new Point(18, 91);
+            group.Controls.Add(endpointLabel);
+
+            serialCombo = new ComboBox();
+            serialCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            serialCombo.Font = new Font(Font.FontFamily, 10F, FontStyle.Bold);
+            serialCombo.Location = new Point(18, 111);
+            serialCombo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            serialCombo.Width = group.Width - 36;
+            group.Controls.Add(serialCombo);
+
+            endpointInput = new TextBox();
+            endpointInput.Font = new Font("Consolas", 9F);
+            endpointInput.Location = new Point(18, 111);
+            endpointInput.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            endpointInput.Width = group.Width - 36;
+            endpointInput.Text = isEndpointA ? "127.0.0.1:9001" : "0.0.0.0:9001";
+            endpointInput.Visible = false;
+            group.Controls.Add(endpointInput);
 
             Label serialMode = new Label();
-            serialMode.Text = "8 数据位  ·  无校验  ·  1 停止位";
-            serialMode.ForeColor = Navy;
-            serialMode.AutoSize = true;
-            serialMode.Location = new Point(18, 104);
+            serialMode.Text = "8N1 无流控 · " + description;
+            serialMode.ForeColor = Muted;
+            serialMode.AutoEllipsis = true;
+            serialMode.Location = new Point(18, 150);
+            serialMode.Size = new Size(238, 34);
+            serialMode.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
             group.Controls.Add(serialMode);
-
-            Label hint = new Label();
-            hint.Text = description;
-            hint.ForeColor = Muted;
-            hint.AutoEllipsis = true;
-            hint.Location = new Point(18, 135);
-            hint.Size = new Size(238, 36);
-            hint.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-            group.Controls.Add(hint);
-            descriptionLabel = hint;
+            descriptionLabel = serialMode;
+            ComboBox resizingTransport = transportCombo;
+            ComboBox resizingSerial = serialCombo;
+            TextBox resizingEndpoint = endpointInput;
 
             group.Resize += delegate
             {
-                resizingCombo.Width = Math.Max(80, group.ClientSize.Width - 36);
-                hint.Width = Math.Max(80, group.ClientSize.Width - 36);
+                resizingTransport.Width = Math.Max(80, group.ClientSize.Width - 36);
+                resizingSerial.Width = Math.Max(80, group.ClientSize.Width - 36);
+                resizingEndpoint.Width = Math.Max(80, group.ClientSize.Width - 36);
+                serialMode.Width = Math.Max(80, group.ClientSize.Width - 36);
             };
             return group;
         }
@@ -240,7 +274,8 @@ namespace RsLoopTest
             patternCombo.DropDownStyle = ComboBoxStyle.DropDownList;
             patternCombo.Items.AddRange(new object[]
             {
-                "递增 00-FF", "全 55", "全 AA", "55/AA 交替", "自定义 HEX 循环"
+                "递增 00-FF", "全 55", "全 AA", "55/AA 交替", "自定义 HEX 循环",
+                "PRBS7", "PRBS15", "PRBS31"
             });
             patternCombo.SelectedIndex = 0;
             patternCombo.Location = new Point(18, 119);
@@ -278,12 +313,28 @@ namespace RsLoopTest
             customPatternInput.Font = new Font("Consolas", 9F);
             customPatternInput.Location = new Point(18, 153);
             customPatternInput.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            customPatternInput.Width = group.Width - 36;
+            customPatternInput.Width = Math.Max(120, group.Width - 286);
             customPatternInput.Enabled = false;
             group.Controls.Add(customPatternInput);
+
+            Label seedLabel = CreateFieldLabel("数据种子（十进制）");
+            seedLabel.Location = new Point(280, 135);
+            group.Controls.Add(seedLabel);
+
+            dataSeedInput = new NumericUpDown();
+            dataSeedInput.Minimum = 0;
+            dataSeedInput.Maximum = uint.MaxValue;
+            dataSeedInput.Value = 305419896; // 0x12345678
+            dataSeedInput.Location = new Point(280, 153);
+            dataSeedInput.Size = new Size(180, 28);
+            group.Controls.Add(dataSeedInput);
             group.Resize += delegate
             {
-                customPatternInput.Width = Math.Max(120, group.ClientSize.Width - 36);
+                int seedX = Math.Max(230, group.ClientSize.Width - 215);
+                seedLabel.Location = new Point(seedX, 135);
+                dataSeedInput.Location = new Point(seedX, 153);
+                dataSeedInput.Width = Math.Max(100, group.ClientSize.Width - seedX - 18);
+                customPatternInput.Width = Math.Max(120, seedX - 30);
             };
             return group;
         }
@@ -319,8 +370,8 @@ namespace RsLoopTest
             modeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
             modeCombo.Items.AddRange(new object[]
             {
-                "双端口环回（A→B→A）",
-                "单端口全双工自环（A TX↔RX）"
+                "双端点环回（A→B→A）",
+                "单端点全双工/自环（A TX↔RX）"
             });
             modeCombo.SelectedIndex = 0;
             modeCombo.Location = new Point(470, 10);
@@ -348,23 +399,28 @@ namespace RsLoopTest
             TableLayoutPanel grid = new TableLayoutPanel();
             grid.Dock = DockStyle.Fill;
             grid.ColumnCount = 4;
-            grid.RowCount = 2;
+            grid.RowCount = 3;
             grid.Margin = new Padding(0, 0, 0, 12);
             for (int index = 0; index < 4; index++)
             {
                 grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
             }
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 33.34F));
 
             grid.Controls.Add(CreateStatCard("A 发送帧", out aSentValue, Blue), 0, 0);
-            grid.Controls.Add(CreateStatCard("B 校验正确", out bOkValue, Green), 1, 0);
-            grid.Controls.Add(CreateStatCard("B 校验错误", out bErrorValue, Red), 2, 0);
-            grid.Controls.Add(CreateStatCard("B 回传帧", out bSentValue, Blue), 3, 0);
-            grid.Controls.Add(CreateStatCard("A 校验正确", out aOkValue, Green), 0, 1);
-            grid.Controls.Add(CreateStatCard("A 校验错误", out aErrorValue, Red), 1, 1);
-            grid.Controls.Add(CreateStatCard("运行时间", out elapsedValue, Navy), 2, 1);
-            grid.Controls.Add(CreateStatCard("往返耗时（最近 / 平均）", out latencyValue, Navy), 3, 1);
+            grid.Controls.Add(CreateStatCard("A 校验正确", out aOkValue, Green), 1, 0);
+            grid.Controls.Add(CreateStatCard("A 校验错误", out aErrorValue, Red), 2, 0);
+            grid.Controls.Add(CreateStatCard("CRC 错误", out crcErrorValue, Red), 3, 0);
+            grid.Controls.Add(CreateStatCard("丢帧", out lostValue, Red), 0, 1);
+            grid.Controls.Add(CreateStatCard("重复帧", out duplicateValue, Red), 1, 1);
+            grid.Controls.Add(CreateStatCard("乱序帧", out outOfOrderValue, Red), 2, 1);
+            grid.Controls.Add(CreateStatCard("在途帧（当前 / 窗口）", out inFlightValue, Blue), 3, 1);
+            grid.Controls.Add(CreateStatCard("错误字节", out errorBytesValue, Red), 0, 2);
+            grid.Controls.Add(CreateStatCard("错误位数", out errorBitsValue, Red), 1, 2);
+            grid.Controls.Add(CreateStatCard("运行时间", out elapsedValue, Navy), 2, 2);
+            grid.Controls.Add(CreateStatCard("往返耗时（最近 / 平均）", out latencyValue, Navy), 3, 2);
             return grid;
         }
 
@@ -470,6 +526,8 @@ namespace RsLoopTest
             randomContentCheck.CheckedChanged += delegate { UpdateDataOptionState(); };
             randomFrameLengthCheck.CheckedChanged += delegate { UpdateDataOptionState(); };
             modeCombo.SelectedIndexChanged += delegate { UpdateModeUi(); };
+            transportACombo.SelectedIndexChanged += delegate { UpdateTransportUi(true); };
+            transportBCombo.SelectedIndexChanged += delegate { UpdateTransportUi(false); };
             displayTimer.Tick += delegate { UpdateStatistics(); };
             controller.LogAvailable += ControllerLogAvailable;
             controller.TestStopped += ControllerTestStopped;
@@ -517,20 +575,12 @@ namespace RsLoopTest
             try
             {
                 LoopTestMode mode = GetSelectedMode();
-                if (portACombo.SelectedItem == null)
-                {
-                    throw new InvalidOperationException("未检测到端口 A，请连接设备后点击“刷新串口”。");
-                }
-                if (mode == LoopTestMode.DualPortRelay && portBCombo.SelectedItem == null)
-                {
-                    throw new InvalidOperationException("双端口模式需要选择端口 B。");
-                }
-
+                TransportSettings endpointA = BuildTransportSettings(true);
+                TransportSettings endpointB = mode == LoopTestMode.DualPortRelay
+                    ? BuildTransportSettings(false) : null;
                 LoopDataOptions options = BuildDataOptions();
                 int baudRate = BaudRateOptions.Parse(baudCombo.Text);
-                string portBName = portBCombo.SelectedItem == null
-                    ? null : portBCombo.SelectedItem.ToString();
-                controller.Start(portACombo.SelectedItem.ToString(), portBName,
+                controller.Start(endpointA, endpointB,
                     baudRate, options, decimal.ToInt32(timeoutInput.Value), mode);
                 SetRunningState(true);
             }
@@ -545,8 +595,12 @@ namespace RsLoopTest
         private void SetRunningState(bool running)
         {
             portACombo.Enabled = !running;
+            transportACombo.Enabled = !running;
+            endpointAInput.Enabled = !running;
+            transportBCombo.Enabled = !running;
+            endpointBInput.Enabled = !running;
             modeCombo.Enabled = !running;
-            baudCombo.Enabled = !running;
+            baudCombo.Enabled = !running && UsesSerialTransport();
             timeoutInput.Enabled = !running;
             patternCombo.Enabled = !running && !randomContentCheck.Checked;
             frameLengthCombo.Enabled = !running && !randomFrameLengthCheck.Checked;
@@ -554,6 +608,7 @@ namespace RsLoopTest
                 patternCombo.SelectedIndex == (int)PayloadPattern.CustomRepeat;
             randomContentCheck.Enabled = !running;
             randomFrameLengthCheck.Enabled = !running;
+            dataSeedInput.Enabled = !running;
             refreshButton.Enabled = !running;
             startButton.Enabled = !running;
             stopButton.Enabled = running;
@@ -579,28 +634,25 @@ namespace RsLoopTest
 
             bool running = controller.GetSnapshot().IsRunning;
             bool singlePort = GetSelectedMode() == LoopTestMode.SinglePortFullDuplex;
-            portAGroup.Text = singlePort ? "端口 A · 全双工自环端口" : "端口 A · 主动发送端";
-            portBGroup.Text = singlePort ? "端口 B · 单端模式不使用" : "端口 B · 回传端";
+            portAGroup.Text = singlePort ? "端点 A · 全双工测试端点" : "端点 A · 主动发送端";
+            portBGroup.Text = singlePort ? "端点 B · 单端模式不使用" : "端点 B · 回传端";
             portBGroup.Enabled = !singlePort;
-            portBCombo.Enabled = !running && !singlePort;
+            transportBCombo.Enabled = !running && !singlePort;
+            portBCombo.Enabled = !running && !singlePort &&
+                (TransportKind)transportBCombo.SelectedIndex == TransportKind.Serial;
+            endpointBInput.Enabled = !running && !singlePort &&
+                (TransportKind)transportBCombo.SelectedIndex != TransportKind.Serial;
             wiringHint.Text = singlePort
-                ? "单端：A 的 TX 与 RX 短接（差分口同极性相连）"
-                : "双端：A/B 的 TX、RX 交叉连接，并连接 GND";
+                ? "串口可 TX↔RX 自环；网络端点需由对端回显同一协议帧"
+                : "A/B 可分别选择串口、TCP Client、TCP Server 或 UDP";
             headerSubtitle.Text = singlePort
-                ? "A 发送 → 同端 RX 接收并校验 → 自动进入下一轮"
-                : "A 发送 → B 校验并回传 → A 校验 → 自动进入下一轮";
-            portAHint.Text = singlePort
-                ? "发送数据，并从同一端口 RX 接收校验"
-                : "发送预设数据，并校验 B 端回传内容";
-            portBHint.Text = singlePort
-                ? "此模式只打开端口 A，不占用端口 B"
-                : "接收并校验 A 端数据，无论结果均原样回传";
-
-            SetStatTitle(bOkValue, singlePort ? "A 接收帧" : "B 校验正确");
-            SetStatTitle(bErrorValue, singlePort ? "A 接收字节" : "B 校验错误");
-            SetStatTitle(bSentValue, singlePort ? "环回接线" : "B 回传帧");
+                ? "A TX 连续发送多帧 → 同端 RX 独立接收、同步并校验"
+                : "A 连续发送多帧 → B 校验并回传 → A 按序校验与统计";
             SetStatTitle(latencyValue, singlePort
                 ? "自环耗时（最近 / 平均）" : "往返耗时（最近 / 平均）");
+            SetStatTitle(crcErrorValue, singlePort ? "CRC 错误" : "CRC 错误（A+B 检出）");
+            UpdateTransportUi(true);
+            UpdateTransportUi(false);
             UpdateStatistics();
         }
 
@@ -620,7 +672,8 @@ namespace RsLoopTest
                 Pattern = (PayloadPattern)patternCombo.SelectedIndex,
                 FrameLength = int.Parse(frameLengthCombo.SelectedItem.ToString()),
                 RandomContent = randomContentCheck.Checked,
-                RandomFrameLength = randomFrameLengthCheck.Checked
+                RandomFrameLength = randomFrameLengthCheck.Checked,
+                DataSeed = decimal.ToUInt32(dataSeedInput.Value)
             };
 
             if (!options.RandomContent && options.Pattern == PayloadPattern.CustomRepeat)
@@ -631,11 +684,102 @@ namespace RsLoopTest
             return options;
         }
 
+        private TransportSettings BuildTransportSettings(bool isEndpointA)
+        {
+            ComboBox transportCombo = isEndpointA ? transportACombo : transportBCombo;
+            ComboBox serialCombo = isEndpointA ? portACombo : portBCombo;
+            TextBox endpointInput = isEndpointA ? endpointAInput : endpointBInput;
+            TransportKind kind = (TransportKind)transportCombo.SelectedIndex;
+            string serialPort = serialCombo.SelectedItem == null
+                ? null : serialCombo.SelectedItem.ToString();
+            return TransportSettings.Parse(kind, serialPort, endpointInput.Text);
+        }
+
+        private void UpdateTransportUi(bool isEndpointA)
+        {
+            ComboBox transportCombo = isEndpointA ? transportACombo : transportBCombo;
+            ComboBox serialCombo = isEndpointA ? portACombo : portBCombo;
+            TextBox endpointInput = isEndpointA ? endpointAInput : endpointBInput;
+            Label endpointLabel = isEndpointA ? endpointALabel : endpointBLabel;
+            Label hint = isEndpointA ? portAHint : portBHint;
+            if (transportCombo == null || transportCombo.SelectedIndex < 0) return;
+
+            TransportKind kind = (TransportKind)transportCombo.SelectedIndex;
+            bool serial = kind == TransportKind.Serial;
+            bool running = controller.GetSnapshot().IsRunning;
+            bool endpointEnabled = !running &&
+                (isEndpointA || GetSelectedMode() == LoopTestMode.DualPortRelay);
+            serialCombo.Visible = serial;
+            serialCombo.Enabled = endpointEnabled && serial;
+            endpointInput.Visible = !serial;
+            endpointInput.Enabled = endpointEnabled && !serial;
+
+            if (!serial)
+            {
+                TransportKind? previousKind = endpointInput.Tag is TransportKind
+                    ? (TransportKind?)endpointInput.Tag : null;
+                string previousDefault = previousKind.HasValue
+                    ? GetDefaultEndpoint(isEndpointA, previousKind.Value) : null;
+                if (!previousKind.HasValue || string.IsNullOrWhiteSpace(endpointInput.Text) ||
+                    string.Equals(endpointInput.Text, previousDefault, StringComparison.Ordinal))
+                    endpointInput.Text = GetDefaultEndpoint(isEndpointA, kind);
+                endpointInput.Tag = kind;
+            }
+
+            switch (kind)
+            {
+                case TransportKind.TcpClient:
+                    endpointLabel.Text = "服务器地址（主机:端口）";
+                    hint.Text = "主动连接 TCP Server；接收与发送在线程中独立进行";
+                    break;
+                case TransportKind.TcpServer:
+                    endpointLabel.Text = "监听地址（本机地址:端口）";
+                    hint.Text = "启动后持续监听；未连接前不会发送测试帧";
+                    break;
+                case TransportKind.Udp:
+                    endpointLabel.Text = "UDP（本地端口@远端主机:端口）";
+                    hint.Text = "示例 9000@127.0.0.1:9001；每个端点本地端口需不同";
+                    break;
+                default:
+                    endpointLabel.Text = "串口号";
+                    hint.Text = "8N1 无流控 · " + (isEndpointA
+                        ? "发送并校验环回内容" : "校验后原样回传");
+                    break;
+            }
+            if (baudCombo != null) baudCombo.Enabled = !running && UsesSerialTransport();
+        }
+
+        private bool UsesSerialTransport()
+        {
+            if (transportACombo == null || transportACombo.SelectedIndex < 0) return true;
+            if ((TransportKind)transportACombo.SelectedIndex == TransportKind.Serial) return true;
+            return GetSelectedMode() == LoopTestMode.DualPortRelay && transportBCombo != null &&
+                transportBCombo.SelectedIndex >= 0 &&
+                (TransportKind)transportBCombo.SelectedIndex == TransportKind.Serial;
+        }
+
+        private static string GetDefaultEndpoint(bool isEndpointA, TransportKind kind)
+        {
+            switch (kind)
+            {
+                case TransportKind.TcpClient:
+                    return isEndpointA ? "127.0.0.1:9001" : "127.0.0.1:9000";
+                case TransportKind.TcpServer:
+                    return isEndpointA ? "0.0.0.0:9000" : "0.0.0.0:9001";
+                case TransportKind.Udp:
+                    return isEndpointA
+                        ? "9000@127.0.0.1:9001" : "9001@127.0.0.1:9000";
+                default:
+                    return string.Empty;
+            }
+        }
+
         private void UpdateDataOptionState()
         {
             bool settingsEnabled = !controller.GetSnapshot().IsRunning;
             patternCombo.Enabled = settingsEnabled && !randomContentCheck.Checked;
             frameLengthCombo.Enabled = settingsEnabled && !randomFrameLengthCheck.Checked;
+            dataSeedInput.Enabled = settingsEnabled;
             customPatternInput.Enabled = settingsEnabled && !randomContentCheck.Checked &&
                 patternCombo.SelectedIndex == (int)PayloadPattern.CustomRepeat;
         }
@@ -643,16 +787,17 @@ namespace RsLoopTest
         private void UpdateStatistics()
         {
             LoopSnapshot snapshot = controller.GetSnapshot();
-            bool singlePort = GetSelectedMode() == LoopTestMode.SinglePortFullDuplex;
             aSentValue.Text = snapshot.ASent.ToString("N0");
-            bOkValue.Text = singlePort
-                ? (snapshot.AReceivedOk + snapshot.AReceivedError).ToString("N0")
-                : snapshot.BReceivedOk.ToString("N0");
-            bErrorValue.Text = singlePort
-                ? snapshot.TotalBytes.ToString("N0") : snapshot.BReceivedError.ToString("N0");
-            bSentValue.Text = singlePort ? "TX↔RX" : snapshot.BSent.ToString("N0");
             aOkValue.Text = snapshot.AReceivedOk.ToString("N0");
             aErrorValue.Text = snapshot.AReceivedError.ToString("N0");
+            crcErrorValue.Text = snapshot.CrcErrors.ToString("N0");
+            lostValue.Text = snapshot.LostFrames.ToString("N0");
+            duplicateValue.Text = snapshot.DuplicateFrames.ToString("N0");
+            outOfOrderValue.Text = snapshot.OutOfOrderFrames.ToString("N0");
+            inFlightValue.Text = snapshot.InFlightFrames.ToString("N0") + " / " +
+                snapshot.WindowSize.ToString("N0");
+            errorBytesValue.Text = snapshot.ErrorBytes.ToString("N0");
+            errorBitsValue.Text = snapshot.ErrorBits.ToString("N0");
             elapsedValue.Text = string.Format("{0:00}:{1:00}:{2:00}",
                 (int)snapshot.Elapsed.TotalHours, snapshot.Elapsed.Minutes, snapshot.Elapsed.Seconds);
             latencyValue.Text = string.Format("{0:0.0} / {1:0.0} ms",
