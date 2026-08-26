@@ -1,0 +1,43 @@
+{
+  "name": "serial-loopback-test",
+  "version": "1.2.0",
+  "description": "Launch the Windows serial loopback test tool from npx",
+  "license": "MIT",
+  "author": "Zhaoqingsong",
+  "homepage": "https://github.com/user-zhaoqingsong/serial-loopback-test#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/user-zhaoqingsong/serial-loopback-test.git"
+  },
+  "bugs": {
+    "url": "https://github.com/user-zhaoqingsong/serial-loopback-test/issues"
+  },
+  "keywords": [
+    "serial-port",
+    "loopback",
+    "uart",
+    "rs232",
+    "rs422",
+    "windows"
+  ],
+  "bin": {
+    "serial-loopback-test": "cli.js"
+  },
+  "files": [
+    "cli.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "test": "node --check cli.js && node cli.js --help"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

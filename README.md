@@ -9,6 +9,12 @@ Windows 串口自动环回测试工具，支持双端口中继环回和单端口
 
 [下载最新 Windows EXE](https://github.com/user-zhaoqingsong/serial-loopback-test/releases/latest)
 
+也可以使用 Node.js 16+ 直接下载、校验并启动：
+
+```powershell
+npx serial-loopback-test
+```
+
 ## 功能
 
 - 双端口环回：A 发送，B 校验并原样回传，A 再次校验。

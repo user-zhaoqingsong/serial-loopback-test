@@ -19,6 +19,10 @@ jobs:
         shell: powershell
         run: .\build.ps1
 
+      - name: Validate npm launcher
+        shell: powershell
+        run: npm test --prefix npm
+
       - name: Upload executable
         uses: actions/upload-artifact@v7
         with:
