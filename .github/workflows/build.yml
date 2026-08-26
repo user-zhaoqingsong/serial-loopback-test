@@ -1,0 +1,27 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build and test
+        shell: powershell
+        run: .\build.ps1
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-loopback-test-windows
+          path: dist/*.exe
+          if-no-files-found: error

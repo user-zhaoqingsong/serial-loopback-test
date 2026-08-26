@@ -1,0 +1,18 @@
+# Build and local validation outputs
+build/
+dist/
+
+# Local AI handoff records
+.ai-worklog/
+
+# Visual Studio / .NET user files
+.vs/
+*.user
+*.suo
+*.pdb
+*.cache
+
+# Operating system files
+Thumbs.db
+Desktop.ini
+.DS_Store
