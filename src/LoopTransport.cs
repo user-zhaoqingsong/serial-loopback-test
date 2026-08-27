@@ -67,26 +67,41 @@ namespace RsLoopTest
     internal sealed class SerialPortLoopTransport : LoopTransport
     {
         private readonly SerialPort port;
+        private Thread receiveThread;
+        private volatile bool active;
 
         public SerialPortLoopTransport(string portName, int baudRate)
         {
             port = new SerialPort(portName, baudRate, Parity.None, 8, StopBits.One)
             {
                 Handshake = Handshake.None,
-                ReadTimeout = 1000,
+                ReadTimeout = SerialPort.InfiniteTimeout,
                 WriteTimeout = 3000,
+                ReadBufferSize = 65536,
+                WriteBufferSize = 65536,
                 DtrEnable = false,
                 RtsEnable = false,
                 ReceivedBytesThreshold = 1
             };
-            port.DataReceived += PortDataReceived;
         }
 
-        public override bool IsReady { get { return port.IsOpen; } }
+        public override bool IsReady { get { return active && port.IsOpen; } }
         public override bool IsSerial { get { return true; } }
         public override bool IsServer { get { return false; } }
         public override string Description { get { return port.PortName; } }
-        public override void Open() { port.Open(); }
+        public override void Open()
+        {
+            port.Open();
+            port.DiscardInBuffer();
+            port.DiscardOutBuffer();
+            active = true;
+            receiveThread = new Thread(ReceiveLoop)
+            {
+                IsBackground = true,
+                Name = "SerialPortReceiver-" + port.PortName
+            };
+            receiveThread.Start();
+        }
 
         public override bool TryWrite(byte[] data, int offset, int count)
         {
@@ -97,33 +112,57 @@ namespace RsLoopTest
 
         public override void ClearBuffers()
         {
-            if (!port.IsOpen) return;
-            port.DiscardInBuffer();
-            port.DiscardOutBuffer();
+            // Open() 已在接收线程启动前清空。运行中调用 PurgeComm 会中止阻塞读取。
         }
 
         public override void Close()
         {
+            active = false;
             try
             {
-                port.DataReceived -= PortDataReceived;
-                if (port.IsOpen) port.Close();
+                if (port.IsOpen)
+                {
+                    port.DiscardOutBuffer();
+                    port.DiscardInBuffer();
+                    port.Close();
+                }
             }
             catch { }
-            finally { port.Dispose(); }
+            finally
+            {
+                if (receiveThread != null && receiveThread != Thread.CurrentThread &&
+                    receiveThread.IsAlive) receiveThread.Join(1500);
+                receiveThread = null;
+                port.Dispose();
+            }
         }
 
-        private void PortDataReceived(object sender, SerialDataReceivedEventArgs eventArgs)
+        private void ReceiveLoop()
         {
-            try
+            while (active)
             {
-                int available = port.BytesToRead;
-                if (available <= 0) return;
-                byte[] data = new byte[available];
-                int read = port.Read(data, 0, data.Length);
-                if (read > 0) RaiseData(data, read);
+                try
+                {
+                    int firstByte = port.ReadByte();
+                    if (firstByte < 0) continue;
+                    int available = port.BytesToRead;
+                    byte[] data = new byte[available + 1];
+                    data[0] = (byte)firstByte;
+                    int offset = 1;
+                    while (offset < data.Length)
+                    {
+                        int read = port.Read(data, offset, data.Length - offset);
+                        if (read <= 0) break;
+                        offset += read;
+                    }
+                    RaiseData(data, offset);
+                }
+                catch (Exception exception)
+                {
+                    if (active) RaiseFault(exception);
+                    return;
+                }
             }
-            catch (Exception exception) { RaiseFault(exception); }
         }
     }
 

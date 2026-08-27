@@ -345,6 +345,41 @@ internal static class LoopCoreTests
                 peer.Close();
             }
         });
+        Run("序号缺口不误计为乱序", delegate
+        {
+            int localPort = GetFreeUdpPort();
+            int peerPort = GetFreeUdpPort();
+            while (peerPort == localPort) peerPort = GetFreeUdpPort();
+            UdpClient peer = new UdpClient(peerPort);
+            peer.Client.ReceiveTimeout = 3000;
+            SerialLoopController controller = new SerialLoopController();
+            try
+            {
+                TransportSettings endpoint = TransportSettings.Parse(TransportKind.Udp,
+                    null, localPort + "@127.0.0.1:" + peerPort);
+                LoopDataOptions options = CreatePrbsOptions();
+                options.InFlightWindow = 2;
+                controller.Start(endpoint, null, 115200, options, 100,
+                    LoopTestMode.SinglePortFullDuplex);
+                IPEndPoint sender = new IPEndPoint(IPAddress.Any, 0);
+                peer.Receive(ref sender); // 故意丢弃序号 0。
+                byte[] second = peer.Receive(ref sender);
+                peer.Send(second, second.Length, new IPEndPoint(IPAddress.Loopback, localPort));
+
+                LoopSnapshot snapshot = WaitForSnapshot(controller, delegate(LoopSnapshot value)
+                {
+                    return value.AReceivedOk >= 1 && value.LostFrames >= 1;
+                }, 3000);
+                Assert(snapshot.OutOfOrderFrames == 0,
+                    "仅有序号缺口时不应把后续顺序帧计为乱序");
+            }
+            finally
+            {
+                controller.Stop("用户停止");
+                controller.Dispose();
+                peer.Close();
+            }
+        });
         Run("丢帧后仍持续填充发送窗口", delegate
         {
             int localPort = GetFreeUdpPort();
@@ -391,6 +426,13 @@ internal static class LoopCoreTests
             Assert(single < dual, "单端自环线路耗时计算错误");
             Assert(dual == SerialTiming.CalculateRoundTripWireMilliseconds(100, 9600),
                 "双端往返兼容计算错误");
+        });
+        Run("串口自动在途窗口限制为三帧", delegate
+        {
+            Assert(SerialLoopController.CalculateWindowSize(4800) == 3,
+                "低速串口自动窗口错误");
+            Assert(SerialLoopController.CalculateWindowSize(2000000) == 3,
+                "高速串口自动窗口不应超过硬件验证边界");
         });
 
         if (failures > 0)

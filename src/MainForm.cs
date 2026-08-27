@@ -33,6 +33,7 @@ namespace RsLoopTest
         private ComboBox frameLengthCombo;
         private TextBox customPatternInput;
         private NumericUpDown dataSeedInput;
+        private ComboBox inFlightWindowCombo;
         private CheckBox randomContentCheck;
         private CheckBox randomFrameLengthCheck;
         private Button startButton;
@@ -253,7 +254,7 @@ namespace RsLoopTest
             baudCombo.Size = new Size(125, 28);
             group.Controls.Add(baudCombo);
 
-            Label timeoutLabel = CreateFieldLabel("最低超时 (ms，低速自动延长)");
+            Label timeoutLabel = CreateFieldLabel("最低超时（ms）");
             timeoutLabel.Location = new Point(160, 35);
             group.Controls.Add(timeoutLabel);
 
@@ -265,6 +266,21 @@ namespace RsLoopTest
             timeoutInput.Location = new Point(160, 59);
             timeoutInput.Size = new Size(125, 28);
             group.Controls.Add(timeoutInput);
+
+            Label windowLabel = CreateFieldLabel("在途窗口（帧）");
+            windowLabel.Location = new Point(300, 35);
+            group.Controls.Add(windowLabel);
+
+            inFlightWindowCombo = new ComboBox();
+            inFlightWindowCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            inFlightWindowCombo.Items.AddRange(new object[]
+            {
+                "自动（推荐）", "1", "2", "3", "4", "8", "16", "32"
+            });
+            inFlightWindowCombo.SelectedIndex = 0;
+            inFlightWindowCombo.Location = new Point(300, 59);
+            inFlightWindowCombo.Size = new Size(128, 28);
+            group.Controls.Add(inFlightWindowCombo);
 
             Label patternLabel = CreateFieldLabel("预设内容");
             patternLabel.Location = new Point(18, 96);
@@ -614,6 +630,7 @@ namespace RsLoopTest
             randomContentCheck.Enabled = !running;
             randomFrameLengthCheck.Enabled = !running;
             dataSeedInput.Enabled = !running;
+            inFlightWindowCombo.Enabled = !running;
             refreshButton.Enabled = !running;
             startButton.Enabled = !running;
             stopButton.Enabled = running;
@@ -678,7 +695,9 @@ namespace RsLoopTest
                 FrameLength = int.Parse(frameLengthCombo.SelectedItem.ToString()),
                 RandomContent = randomContentCheck.Checked,
                 RandomFrameLength = randomFrameLengthCheck.Checked,
-                DataSeed = decimal.ToUInt32(dataSeedInput.Value)
+                DataSeed = decimal.ToUInt32(dataSeedInput.Value),
+                InFlightWindow = inFlightWindowCombo.SelectedIndex == 0 ? 0 :
+                    int.Parse(inFlightWindowCombo.SelectedItem.ToString())
             };
 
             if (!options.RandomContent && options.Pattern == PayloadPattern.CustomRepeat)

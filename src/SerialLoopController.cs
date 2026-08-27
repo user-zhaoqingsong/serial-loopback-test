@@ -22,7 +22,6 @@ namespace RsLoopTest
         private readonly AutoResetEvent senderSignal = new AutoResetEvent(false);
         private readonly Stopwatch elapsed = new Stopwatch();
         private readonly Dictionary<uint, PendingFrame> pending = new Dictionary<uint, PendingFrame>();
-        private readonly HashSet<uint> finalizedAhead = new HashSet<uint>();
         private readonly HashSet<uint> recentReceived = new HashSet<uint>();
         private readonly Queue<uint> recentReceivedOrder = new Queue<uint>();
         private LoopTransport transportA;
@@ -37,7 +36,8 @@ namespace RsLoopTest
         private int requestedTimeoutMilliseconds;
         private int windowSize;
         private uint nextSequence;
-        private uint nextExpectedSequence;
+        private uint highestReceivedSequence;
+        private bool hasReceivedSequence;
         private long aSent;
         private long aReceivedOk;
         private long aReceivedError;
@@ -86,7 +86,9 @@ namespace RsLoopTest
                     requestedTimeoutMilliseconds = responseTimeoutMilliseconds;
                     bool allNetwork = !endpointA.IsSerial &&
                         (mode == LoopTestMode.SinglePortFullDuplex || !endpointB.IsSerial);
-                    windowSize = allNetwork ? 32 : CalculateWindowSize(baudRate);
+                    windowSize = dataOptions.InFlightWindow > 0
+                        ? dataOptions.InFlightWindow
+                        : (allNetwork ? 32 : CalculateWindowSize(baudRate));
                     parserA = new LoopFrameParser();
                     parserB = mode == LoopTestMode.DualPortRelay ? new LoopFrameParser() : null;
 
@@ -125,6 +127,12 @@ namespace RsLoopTest
                 dataOptions.Describe() + "，初始种子 0x" + dataOptions.DataSeed.ToString("X8") +
                 "，在途窗口 " + windowSize + " 帧。", false);
             EmitLog("协议：RSLP v1，序号 + 长度 + 帧起始种子 + 头部 CRC32 + 整帧 CRC32。", false);
+            if (dataOptions.InFlightWindow > 3 &&
+                (endpointA.IsSerial || (endpointB != null && endpointB.IsSerial)))
+            {
+                EmitLog("提示：当前串口使用手动在途窗口 " + dataOptions.InFlightWindow +
+                    "；窗口过大可能超过 USB 串口桥的双向缓冲能力。", true);
+            }
         }
 
         public void Stop(string reason)
@@ -148,9 +156,9 @@ namespace RsLoopTest
                 senderSignal.Set();
             }
 
+            JoinSender(closingSender);
             CloseTransport(closingTransportA, true);
             CloseTransport(closingTransportB, false);
-            JoinSender(closingSender);
 
             if (shouldNotify)
             {
@@ -214,13 +222,10 @@ namespace RsLoopTest
             options.Validate();
         }
 
-        private static int CalculateWindowSize(int rate)
+        internal static int CalculateWindowSize(int rate)
         {
             if (rate <= 1200) return 2;
-            if (rate <= 9600) return 4;
-            if (rate <= 115200) return 8;
-            if (rate <= 921600) return 16;
-            return 32;
+            return 3;
         }
 
         private void SenderLoop()
@@ -278,7 +283,6 @@ namespace RsLoopTest
                             {
                                 pending.Remove(frameToSend.Sequence);
                                 aSent--;
-                                MarkFinalized(frameToSend.Sequence);
                             }
                             senderSignal.WaitOne(20);
                             continue;
@@ -317,7 +321,6 @@ namespace RsLoopTest
                 pending.Remove(sequence);
                 lostFrames++;
                 aReceivedError++;
-                MarkFinalized(sequence);
                 EmitSampledError("序号 " + sequence + " 超时，判定丢帧（" +
                     frame.TimeoutMilliseconds + " ms），测试继续。", lostFrames);
             }
@@ -408,7 +411,7 @@ namespace RsLoopTest
             }
 
             pending.Remove(frame.Sequence);
-            if (frame.Sequence != nextExpectedSequence) outOfOrderFrames++;
+            TrackArrivalOrder(frame.Sequence);
             long now = Stopwatch.GetTimestamp();
             lastRoundTripMilliseconds = ElapsedMilliseconds(expectedFrame.SentTimestamp, now);
             totalRoundTripMilliseconds += lastRoundTripMilliseconds;
@@ -431,15 +434,27 @@ namespace RsLoopTest
                     (frame.FrameCrcValid ? "正确" : "错误") + "，错误字节 " +
                     frameErrorBytes + "，错误位 " + frameErrorBits + "。", aReceivedError);
             }
-            MarkFinalized(frame.Sequence);
             RememberReceived(frame.Sequence);
             senderSignal.Set();
         }
 
-        private void MarkFinalized(uint sequence)
+        private void TrackArrivalOrder(uint sequence)
         {
-            finalizedAhead.Add(sequence);
-            while (finalizedAhead.Remove(nextExpectedSequence)) nextExpectedSequence++;
+            if (!hasReceivedSequence)
+            {
+                highestReceivedSequence = sequence;
+                hasReceivedSequence = true;
+                return;
+            }
+            if (IsNewerSequence(sequence, highestReceivedSequence))
+                highestReceivedSequence = sequence;
+            else if (sequence != highestReceivedSequence)
+                outOfOrderFrames++;
+        }
+
+        private static bool IsNewerSequence(uint sequence, uint reference)
+        {
+            return unchecked((int)(sequence - reference)) > 0;
         }
 
         private void RememberReceived(uint sequence)
@@ -581,9 +596,9 @@ namespace RsLoopTest
                     transportB = null;
                     senderThread = null;
                 }
+                JoinSender(closingSender);
                 CloseTransport(closingTransportA, true);
                 CloseTransport(closingTransportB, false);
-                JoinSender(closingSender);
                 EmitLog("测试异常停止：" + reason, true);
                 Action<string> handler = TestStopped;
                 if (handler != null) handler(reason);
@@ -607,9 +622,9 @@ namespace RsLoopTest
                 senderThread = null;
                 senderSignal.Set();
             }
+            JoinSender(closingSender);
             CloseTransport(closingTransportA, true);
             CloseTransport(closingTransportB, false);
-            JoinSender(closingSender);
         }
 
         private void ResetState()
@@ -620,9 +635,9 @@ namespace RsLoopTest
             lostFrames = duplicateFrames = outOfOrderFrames = 0;
             errorBytes = errorBits = latencySamples = 0;
             totalRoundTripMilliseconds = lastRoundTripMilliseconds = 0.0;
-            nextSequence = nextExpectedSequence = 0;
+            nextSequence = highestReceivedSequence = 0;
+            hasReceivedSequence = false;
             pending.Clear();
-            finalizedAhead.Clear();
             recentReceived.Clear();
             recentReceivedOrder.Clear();
             elapsed.Reset();

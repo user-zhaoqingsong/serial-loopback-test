@@ -24,6 +24,7 @@ namespace RsLoopTest
         public bool RandomFrameLength { get; set; }
         public byte[] CustomPattern { get; set; }
         public uint DataSeed { get; set; }
+        public int InFlightWindow { get; set; }
 
         public void Validate()
         {
@@ -46,6 +47,10 @@ namespace RsLoopTest
             {
                 throw new ArgumentException("自定义预设内容不能为空。");
             }
+            if (InFlightWindow < 0 || InFlightWindow > 64)
+            {
+                throw new ArgumentException("在途窗口必须为 0（自动）或 1–64 帧。");
+            }
         }
 
         public LoopDataOptions Clone()
@@ -57,7 +62,8 @@ namespace RsLoopTest
                 RandomContent = RandomContent,
                 RandomFrameLength = RandomFrameLength,
                 CustomPattern = CustomPattern == null ? null : (byte[])CustomPattern.Clone(),
-                DataSeed = DataSeed
+                DataSeed = DataSeed,
+                InFlightWindow = InFlightWindow
             };
         }
 
